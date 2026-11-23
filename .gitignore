@@ -21,3 +21,34 @@ mmap_generate_*.h
 
 # 敏感配置文件（密钥等），只提交 .example 模板
 secret_config.h
+
+# Python 缓存与虚拟环境
+__pycache__/
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+
+# Windows 与编辑器临时文件
+Thumbs.db
+desktop.ini
+.idea/
+*.swp
+*.tmp
+*.bak
+*.log
+
+# 编译与调试衍生文件
+*.elf
+*.map
+*.hex
+*.uf2
+compile_commands.json
+.ccache/
+
+# 本地环境与密钥文件
+.env.*
+!.env.example
+*.pem
+*.key
+
