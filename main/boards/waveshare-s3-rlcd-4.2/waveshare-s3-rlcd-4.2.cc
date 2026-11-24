@@ -12,6 +12,7 @@
 #include "config.h"
 #include "codecs/box_audio_codec.h"
 #include "wifi_station.h"
+#include <wifi_manager.h>
 #include "mcp_server.h"
 #include "settings.h"
 #include <cJSON.h>
@@ -19,6 +20,7 @@
 #include "managers/sensor_manager.h"
 #include "managers/sdcard_manager.h"
 #include "managers/pomodoro_manager.h"
+#include "managers/cast_manager.h"
 
 // 声明小智字体（用于系统信息显示时临时切换字体大小）
 LV_FONT_DECLARE(font_puhui_14_1);
@@ -104,11 +106,11 @@ private:
 
         // USER 按钮（GPIO18）- 辅助功能按键
         user_button_.OnClick([this]() {
-            if (display_) display_->NotifyUserActivity();  // 记录用户活动
             if (display_) {
+                display_->NotifyUserActivity();  // 记录用户活动
                 display_->CycleDisplayMode();
+                ESP_LOGI(TAG, "USER 按钮单击：切换屏幕页 (%s)", display_->GetDisplayModeName());
             }
-            ESP_LOGI(TAG, "USER 按钮单击：切换天气页/音乐页");
         });
 
         user_button_.OnDoubleClick([this]() {
@@ -349,10 +351,10 @@ private:
         // ===== 屏幕切换工具（语音可调用）=====
         mcp_server.AddTool(
             "self.disp.switch",
-            "Switch display page between weather, music, and pomodoro.\n"
-            "Use when user says: '切到音乐页', '打开天气页', '切换屏幕', '打开番茄钟页面', 'switch screen'.\n"
+            "Switch display page between weather, music, pomodoro, and wireless cast.\n"
+            "Use when user says: '切到音乐页', '打开天气页', '切换屏幕', '打开番茄钟页面', '切到投屏页', '打开无线投屏', 'switch screen'.\n"
             "Args:\n"
-            "  `mode`: 'toggle' | 'music' | 'weather' | 'pomodoro' (default: 'toggle')",
+            "  `mode`: 'toggle' | 'music' | 'weather' | 'pomodoro' | 'cast' (default: 'toggle')",
             PropertyList({
                 Property("mode", kPropertyTypeString, std::string("toggle"))
             }),
@@ -380,12 +382,15 @@ private:
                     display_->SwitchToWeatherPage();
                 } else if (mode == "pomodoro") {
                     display_->SwitchToPomodoroPage();
+                } else if (mode == "cast") {
+                    display_->SwitchToCastPage();
                 } else {
-                    return std::string("参数 mode 无效，请使用 toggle/music/weather/pomodoro");
+                    return std::string("参数 mode 无效，请使用 toggle/music/weather/pomodoro/cast");
                 }
 
                 if (display_->IsMusicMode()) return std::string("已切换到音乐页");
                 if (display_->IsPomodoroMode()) return std::string("已切换到番茄钟页");
+                if (display_->IsCastMode()) return std::string("已切换到无线投屏页");
                 return std::string("已切换到天气页");
             }
         );
@@ -466,6 +471,30 @@ private:
                          pomo.getStateText().c_str(),
                          pomo.getRemainingTimeStr().c_str(),
                          pomo.getMinutes());
+                return std::string(buf);
+            });
+
+        // ===== 无线投屏状态查询工具 =====
+        mcp_server.AddTool("self.cast.status",
+            "Get wireless cast IPv4 address, port, and frame status.\n"
+            "Use when user asks: '投屏IP多少', '投屏状态', '怎么无线投屏', 'cast status'",
+            PropertyList(),
+            [](const PropertyList&) -> ReturnValue {
+                auto& wifi = WifiManager::GetInstance();
+                auto& cast_mgr = CastManager::getInstance();
+                const std::string ip = wifi.GetIpAddress();
+                char buf[256];
+                if (!wifi.IsConnected() || ip.empty()) {
+                    snprintf(buf, sizeof(buf), "当前未连接 Wi-Fi，投屏服务暂未就绪（默认端口 %u）。", cast_mgr.getPort());
+                } else {
+                    snprintf(buf, sizeof(buf),
+                             "无线投屏地址为 %s:%u，接收接口 /api/cast/frame，服务%s，当前%s，累计接收 %lu 帧。",
+                             ip.c_str(),
+                             cast_mgr.getPort(),
+                             cast_mgr.isRunning() ? "运行中" : "未启动",
+                             cast_mgr.isStreaming() ? "正在投屏" : "等待连接",
+                             static_cast<unsigned long>(cast_mgr.getFramesReceived()));
+                }
                 return std::string(buf);
             });
 

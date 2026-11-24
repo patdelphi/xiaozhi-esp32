@@ -21,6 +21,7 @@
 #include <freertos/task.h>
 #include <esp_log.h>
 #include <esp_err.h>
+#include <esp_heap_caps.h>
 #include "custom_lcd_display.h"
 #include "lcd_display.h"
 #include "esp_lvgl_port.h"
@@ -38,6 +39,11 @@ void CustomLcdDisplay::Lvgl_flush_cb(lv_display_t * disp, const lv_area_t * area
 {
     assert(disp != NULL);
     CustomLcdDisplay *self = (CustomLcdDisplay *)lv_display_get_user_data(disp);
+    // 第四屏处于无线投屏激活态时跳过 LVGL 刷屏，防止后台状态更新覆盖投屏图像
+    if (self->display_mode_.load() == MODE_CAST && self->cast_streaming_.load()) {
+        lv_disp_flush_ready(disp);
+        return;
+    }
     RlcdDriver *rlcd = self->rlcd_;
     uint16_t *buffer = (uint16_t *)color_p;
     for(int y = area->y1; y <= area->y2; y++)
@@ -83,9 +89,13 @@ CustomLcdDisplay::CustomLcdDisplay(esp_lcd_panel_io_handle_t panel_io,
     assert(lvgl_buffer1);
     lv_display_set_buffers(display_, lvgl_buffer1, NULL, lvgl_buffer_size, LV_DISPLAY_RENDER_MODE_PARTIAL);
 
-    // 3. 初始化 RLCD 屏幕
+    // 3. 初始化 RLCD 屏幕并分配 1-bit 投屏帧缓冲
     ESP_LOGI(TAG, "初始化 RLCD 屏幕");
     rlcd_->RLCD_Init();
+    cast_frame_size_ = static_cast<size_t>(transfer >> 3);
+    cast_frame_buf_ = static_cast<uint8_t *>(heap_caps_malloc(cast_frame_size_, MALLOC_CAP_SPIRAM));
+    assert(cast_frame_buf_);
+    memset(cast_frame_buf_, ColorWhite, cast_frame_size_);
 
     lvgl_port_unlock();
     if (display_ == nullptr) {
@@ -93,11 +103,12 @@ CustomLcdDisplay::CustomLcdDisplay(esp_lcd_panel_io_handle_t panel_io,
         return;
     }
 
-    // 4. 创建天气页 + 音乐页 + 番茄钟页 UI
-    ESP_LOGI(TAG, "创建天气页 + 音乐页 + 番茄钟页 UI");
+    // 4. 创建天气页 + 音乐页 + 番茄钟页 + 无线投屏页 UI
+    ESP_LOGI(TAG, "创建天气页 + 音乐页 + 番茄钟页 + 无线投屏页 UI");
     SetupWeatherUI();
     SetupMusicUI();
     SetupPomodoroUI();
+    SetupCastUI();
     // 告诉显示框架：当前自定义 UI 已经初始化完成
     // 否则基类的 SetStatus/ShowNotification 会一直误判为“UI 未准备好”
     setup_ui_called_ = true;
@@ -110,6 +121,10 @@ CustomLcdDisplay::CustomLcdDisplay(esp_lcd_panel_io_handle_t panel_io,
 CustomLcdDisplay::~CustomLcdDisplay() {
     if (update_task_handle_) {
         vTaskDelete(update_task_handle_);
+    }
+    if (cast_frame_buf_) {
+        heap_caps_free(cast_frame_buf_);
+        cast_frame_buf_ = nullptr;
     }
     delete rlcd_;
 }
@@ -348,14 +363,15 @@ void CustomLcdDisplay::SetTheme(Theme* theme) {
     ESP_LOGI(TAG, "RLCD 单色屏，跳过主题切换（已保存 theme 指针）");
 }
 
-void CustomLcdDisplay::ApplyDisplayMode() {
+void CustomLcdDisplay::ApplyDisplayMode(bool allow_cast_blit) {
     // 先隐藏所有页面
     if (weather_page_) lv_obj_add_flag(weather_page_, LV_OBJ_FLAG_HIDDEN);
     if (music_page_) lv_obj_add_flag(music_page_, LV_OBJ_FLAG_HIDDEN);
     if (pomodoro_page_) lv_obj_add_flag(pomodoro_page_, LV_OBJ_FLAG_HIDDEN);
+    if (cast_page_) lv_obj_add_flag(cast_page_, LV_OBJ_FLAG_HIDDEN);
 
     // 显示当前页面
-    switch (display_mode_) {
+    switch (display_mode_.load()) {
         case MODE_WEATHER:
             if (weather_page_) lv_obj_remove_flag(weather_page_, LV_OBJ_FLAG_HIDDEN);
             break;
@@ -365,25 +381,42 @@ void CustomLcdDisplay::ApplyDisplayMode() {
         case MODE_POMODORO:
             if (pomodoro_page_) lv_obj_remove_flag(pomodoro_page_, LV_OBJ_FLAG_HIDDEN);
             break;
+        case MODE_CAST:
+            if (cast_page_) lv_obj_remove_flag(cast_page_, LV_OBJ_FLAG_HIDDEN);
+            if (cast_streaming_.load() && cast_has_frame_ && rlcd_ && cast_frame_buf_) {
+                if (allow_cast_blit) {
+                    rlcd_->RLCD_DisplayMono1Bit(cast_frame_buf_, cast_frame_size_);
+                    cast_pending_blit_ = false;
+                } else {
+                    // 处于语音保护阶段时只缓存待刷标志，通话结束后补刷
+                    cast_pending_blit_ = true;
+                }
+            }
+            break;
     }
 }
 
 void CustomLcdDisplay::CycleDisplayMode() {
     DisplayLockGuard lock(this);
-    // 三页循环：天气 → 音乐 → 番茄钟 → 天气
-    switch (display_mode_) {
-        case MODE_WEATHER:  display_mode_ = MODE_MUSIC; break;
-        case MODE_MUSIC:    display_mode_ = MODE_POMODORO; break;
-        case MODE_POMODORO: display_mode_ = MODE_WEATHER; break;
+    // 四页循环：天气 → 音乐 → 番茄钟 → 投屏 → 天气
+    switch (display_mode_.load()) {
+        case MODE_WEATHER:  display_mode_.store(MODE_MUSIC); break;
+        case MODE_MUSIC:    display_mode_.store(MODE_POMODORO); break;
+        case MODE_POMODORO: display_mode_.store(MODE_CAST); break;
+        case MODE_CAST:     display_mode_.store(MODE_WEATHER); break;
     }
     ApplyDisplayMode();
-    const char* name = "未知";
-    switch (display_mode_) {
-        case MODE_WEATHER:  name = "天气页"; break;
-        case MODE_MUSIC:    name = "音乐页"; break;
-        case MODE_POMODORO: name = "番茄钟"; break;
+    ESP_LOGI(TAG, "页面切换: %s", GetDisplayModeName());
+}
+
+const char* CustomLcdDisplay::GetDisplayModeName() const {
+    switch (display_mode_.load()) {
+        case MODE_WEATHER:  return "weather";
+        case MODE_MUSIC:    return "music";
+        case MODE_POMODORO: return "pomodoro";
+        case MODE_CAST:     return "cast";
+        default:            return "unknown";
     }
-    ESP_LOGI(TAG, "页面切换: %s", name);
 }
 
 void CustomLcdDisplay::SetMusicInfo(const char* title, const char* artist) {
@@ -464,8 +497,8 @@ void CustomLcdDisplay::SetMusicProgress(uint32_t current_ms, uint32_t total_ms) 
 
 void CustomLcdDisplay::SwitchToMusicPage() {
     DisplayLockGuard lock(this);
-    if (display_mode_ != MODE_MUSIC) {
-        display_mode_ = MODE_MUSIC;
+    if (display_mode_.load() != MODE_MUSIC) {
+        display_mode_.store(MODE_MUSIC);
         ApplyDisplayMode();
         ESP_LOGI(TAG, "自动切换到音乐页");
     }
@@ -473,8 +506,8 @@ void CustomLcdDisplay::SwitchToMusicPage() {
 
 void CustomLcdDisplay::SwitchToWeatherPage() {
     DisplayLockGuard lock(this);
-    if (display_mode_ != MODE_WEATHER) {
-        display_mode_ = MODE_WEATHER;
+    if (display_mode_.load() != MODE_WEATHER) {
+        display_mode_.store(MODE_WEATHER);
         ApplyDisplayMode();
         ESP_LOGI(TAG, "自动切换到天气页");
     }
@@ -484,10 +517,85 @@ void CustomLcdDisplay::SwitchToWeatherPage() {
 
 void CustomLcdDisplay::SwitchToPomodoroPage() {
     DisplayLockGuard lock(this);
-    if (display_mode_ != MODE_POMODORO) {
-        display_mode_ = MODE_POMODORO;
+    if (display_mode_.load() != MODE_POMODORO) {
+        display_mode_.store(MODE_POMODORO);
         ApplyDisplayMode();
         ESP_LOGI(TAG, "自动切换到番茄钟页");
+    }
+}
+
+void CustomLcdDisplay::SwitchToCastPage() {
+    DisplayLockGuard lock(this);
+    if (display_mode_.load() != MODE_CAST) {
+        display_mode_.store(MODE_CAST);
+        ApplyDisplayMode();
+        ESP_LOGI(TAG, "切换到无线投屏页");
+    }
+}
+
+bool CustomLcdDisplay::UpdateCastFrame(const uint8_t* mono_buf, size_t len, bool auto_switch, bool allow_blit) {
+    if (!mono_buf || !cast_frame_buf_ || len != cast_frame_size_) {
+        return false;
+    }
+
+    DisplayLockGuard lock(this);
+    memcpy(cast_frame_buf_, mono_buf, len);
+    cast_has_frame_ = true;
+    cast_streaming_.store(true);
+
+    if (auto_switch && display_mode_.load() != MODE_CAST) {
+        display_mode_.store(MODE_CAST);
+        // 切页时统一由下方逻辑受 allow_blit 约束决定立即刷屏还是暂缓
+        ApplyDisplayMode(false);
+    }
+
+    if (display_mode_.load() == MODE_CAST) {
+        if (allow_blit && rlcd_) {
+            cast_pending_blit_ = false;
+            return rlcd_->RLCD_DisplayMono1Bit(cast_frame_buf_, cast_frame_size_);
+        }
+        cast_pending_blit_ = true;
+    }
+    return false;
+}
+
+void CustomLcdDisplay::SetCastStreaming(bool active) {
+    DisplayLockGuard lock(this);
+    const bool prev = cast_streaming_.exchange(active);
+    if (!active) {
+        cast_pending_blit_ = false;
+        if (prev && display_mode_.load() == MODE_CAST && cast_page_) {
+            lv_obj_invalidate(lv_screen_active());
+        }
+    } else if (!prev && display_mode_.load() == MODE_CAST && cast_has_frame_ && rlcd_ && cast_frame_buf_) {
+        rlcd_->RLCD_DisplayMono1Bit(cast_frame_buf_, cast_frame_size_);
+        cast_pending_blit_ = false;
+    }
+}
+
+bool CustomLcdDisplay::FlushBufferedCastFrameIfNeeded() {
+    DisplayLockGuard lock(this);
+    if (display_mode_.load() == MODE_CAST && cast_streaming_.load() && cast_has_frame_ &&
+        cast_pending_blit_ && rlcd_ && cast_frame_buf_) {
+        cast_pending_blit_ = false;
+        return rlcd_->RLCD_DisplayMono1Bit(cast_frame_buf_, cast_frame_size_);
+    }
+    return false;
+}
+
+void CustomLcdDisplay::UpdateCastWaitingInfo(const char* ip_text, const char* status_text, const char* stats_text) {
+    DisplayLockGuard lock(this);
+    if (cast_ip_label_ && ip_text && last_cast_ip_text_ != ip_text) {
+        lv_label_set_text(cast_ip_label_, ip_text);
+        last_cast_ip_text_ = ip_text;
+    }
+    if (cast_status_label_ && status_text && last_cast_status_text_ != status_text) {
+        lv_label_set_text(cast_status_label_, status_text);
+        last_cast_status_text_ = status_text;
+    }
+    if (cast_stats_label_ && stats_text && last_cast_stats_text_ != stats_text) {
+        lv_label_set_text(cast_stats_label_, stats_text);
+        last_cast_stats_text_ = stats_text;
     }
 }
 

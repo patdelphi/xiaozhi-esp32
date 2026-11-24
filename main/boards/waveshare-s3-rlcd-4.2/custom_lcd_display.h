@@ -2,6 +2,9 @@
 #define __CUSTOM_LCD_DISPLAY_H__
 
 #include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <string>
 #include <driver/gpio.h>
 #include "lcd_display.h"
 #include "rlcd_driver.h"
@@ -26,7 +29,8 @@
 //   weather_ui.cc          - 天气站 UI 布局（SetupWeatherUI）
 //   music_ui.cc            - 音乐页 UI 布局（SetupMusicUI）
 //   pomodoro_ui.cc         - 番茄钟 UI 布局（SetupPomodoroUI）
-//   data_update_task.cc    - 后台数据更新任务（时间/天气/传感器/电池/WiFi/AI状态/番茄钟）
+//   cast_ui.cc             - 第四屏无线投屏等待 UI 布局（SetupCastUI）
+//   data_update_task.cc    - 后台数据更新任务（时间/天气/传感器/电池/WiFi/AI状态/番茄钟/投屏）
 //   custom_lcd_display.cc  - 核心类（构造/析构/AI适配/备忘录/基类重写）
 class CustomLcdDisplay : public LcdDisplay {
 private:
@@ -34,14 +38,16 @@ private:
         MODE_WEATHER = 0,
         MODE_MUSIC = 1,
         MODE_POMODORO = 2,
+        MODE_CAST = 3,
     };
-    DisplayMode display_mode_ = MODE_WEATHER;
+    std::atomic<DisplayMode> display_mode_{MODE_WEATHER};
 
     // RLCD 硬件驱动（独立模块，负责 SPI 通信和像素操作）
     RlcdDriver *rlcd_ = nullptr;
     lv_obj_t *weather_page_ = nullptr;
     lv_obj_t *music_page_ = nullptr;
     lv_obj_t *pomodoro_page_ = nullptr;
+    lv_obj_t *cast_page_ = nullptr;
 
     // ===== 天气站 UI 组件 =====
     // 状态栏（右上角浮动胶囊）
@@ -90,6 +96,25 @@ private:
     lv_obj_t *pomo_battery_icon_img_ = nullptr;  // 状态栏电池图标
     lv_obj_t *pomo_battery_pct_label_ = nullptr; // 状态栏电量文字
 
+    // ===== 无线投屏第四屏 UI 组件与帧缓存 =====
+    lv_obj_t *cast_time_label_ = nullptr;        // 顶部时钟
+    lv_obj_t *cast_wifi_icon_img_ = nullptr;     // 状态栏 WiFi 图标
+    lv_obj_t *cast_battery_icon_img_ = nullptr;  // 状态栏电池图标
+    lv_obj_t *cast_battery_pct_label_ = nullptr; // 状态栏电量文字
+    lv_obj_t *cast_status_label_ = nullptr;      // 等待状态提示
+    lv_obj_t *cast_ip_label_ = nullptr;          // 本机 IPv4:端口 显示
+    lv_obj_t *cast_info_label_ = nullptr;        // 接口提示
+    lv_obj_t *cast_stats_label_ = nullptr;       // Wi-Fi 与帧统计文案
+
+    uint8_t *cast_frame_buf_ = nullptr;          // PSRAM 最新 1-bit 投屏帧缓冲（15,000 B）
+    size_t cast_frame_size_ = 0;
+    std::atomic<bool> cast_streaming_{false};    // 是否处于已连线投屏显示态
+    bool cast_has_frame_ = false;
+    bool cast_pending_blit_ = false;
+    std::string last_cast_ip_text_;
+    std::string last_cast_status_text_;
+    std::string last_cast_stats_text_;
+
     // 图片图标（不能用基类的 label，因为我们用 lv_image 而不是 Font Awesome 文字）
     lv_obj_t *wifi_icon_img_ = nullptr;
     lv_obj_t *battery_icon_img_ = nullptr;
@@ -120,11 +145,12 @@ private:
     // LVGL flush 回调（将 RGB565 转换为 1-bit 并刷新到 RLCD）
     static void Lvgl_flush_cb(lv_display_t * disp, const lv_area_t * area, uint8_t * color_p);
 
-    // UI 创建（实现在 weather_ui.cc / music_ui.cc / pomodoro_ui.cc）
+    // UI 创建（实现在 weather_ui.cc / music_ui.cc / pomodoro_ui.cc / cast_ui.cc）
     void SetupWeatherUI();
     void SetupMusicUI();
     void SetupPomodoroUI();
-    void ApplyDisplayMode();
+    void SetupCastUI();
+    void ApplyDisplayMode(bool allow_cast_blit = true);
     
     // 备忘录
     void LoadMemoFromNvs();   // 从 NVS 加载备忘录到 UI
@@ -174,9 +200,19 @@ public:
     void RefreshMemoDisplay();           // 自动获取锁（外部调用用这个）
     void RefreshMemoDisplayInternal();   // 不获取锁（已持锁时用这个，避免死锁）
     void CycleDisplayMode();
-    bool IsMusicMode() const { return display_mode_ == MODE_MUSIC; }
-    bool IsPomodoroMode() const { return display_mode_ == MODE_POMODORO; }
+    bool IsMusicMode() const { return display_mode_.load() == MODE_MUSIC; }
+    bool IsPomodoroMode() const { return display_mode_.load() == MODE_POMODORO; }
+    bool IsCastMode() const { return display_mode_.load() == MODE_CAST; }
+    bool IsCastStreaming() const { return cast_streaming_.load(); }
+    const char* GetDisplayModeName() const;
     void SwitchToPomodoroPage();
+    void SwitchToCastPage();
+
+    // 无线投屏帧更新与等待页控制
+    bool UpdateCastFrame(const uint8_t* mono_buf, size_t len, bool auto_switch, bool allow_blit);
+    void SetCastStreaming(bool active);
+    bool FlushBufferedCastFrameIfNeeded();
+    void UpdateCastWaitingInfo(const char* ip_text, const char* status_text, const char* stats_text);
 
     // 番茄钟 UI 更新方法
     void UpdatePomodoroDisplay(const char* state_text, const char* countdown_text,

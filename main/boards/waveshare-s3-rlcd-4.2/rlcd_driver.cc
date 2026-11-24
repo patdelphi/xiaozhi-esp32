@@ -199,6 +199,41 @@ void RlcdDriver::RLCD_Display() {
     RLCD_Sendbuffera(DispBuffer, DisplayLen);
 }
 
+bool RlcdDriver::RLCD_DisplayMono1Bit(const uint8_t *mono_buf, size_t len) {
+    if (!mono_buf || !DispBuffer || !PixelIndexLUT || !PixelBitLUT) {
+        ESP_LOGE(TAG, "1-bit 直写失败：缓冲区未初始化");
+        return false;
+    }
+    if (len != static_cast<size_t>(DisplayLen)) {
+        ESP_LOGE(TAG, "1-bit 直写长度不匹配：期望 %d 字节，实际 %u 字节",
+                 DisplayLen, static_cast<unsigned>(len));
+        return false;
+    }
+
+    // 输入位图为行优先 MSB-first，每个字节高比特在左（1=白，0=黑）
+    const int row_bytes = width_ >> 3;
+    for (int y = 0; y < height_; ++y) {
+        const uint8_t *row_ptr = mono_buf + y * row_bytes;
+        int x_base = 0;
+        for (int bx = 0; bx < row_bytes; ++bx) {
+            const uint8_t byte_val = row_ptr[bx];
+            for (int bit = 0; bit < 8; ++bit) {
+                const uint16_t x = static_cast<uint16_t>(x_base + bit);
+                const uint32_t idx = PixelIndexLUT[x][y];
+                const uint8_t mask = PixelBitLUT[x][y];
+                if (byte_val & (0x80U >> bit)) {
+                    DispBuffer[idx] |= mask;
+                } else {
+                    DispBuffer[idx] &= static_cast<uint8_t>(~mask);
+                }
+            }
+            x_base += 8;
+        }
+    }
+    RLCD_Display();
+    return true;
+}
+
 void RlcdDriver::SetContrast(uint8_t level) {
     // 调节 RLCD 对比度（通过修改 VCOM 电压）
     // level 范围: 0x00-0x1F (理论上越大对比度越高)

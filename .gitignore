@@ -52,3 +52,7 @@ compile_commands.json
 *.pem
 *.key
 
+# 便携烧录包二进制产物（仅保留脚本与说明文档）
+flash_package/tools/
+flash_package/firmware/
+

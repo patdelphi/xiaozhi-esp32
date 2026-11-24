@@ -23,9 +23,11 @@
 #include "board.h"
 #include "settings.h"
 #include "assets/lang_config.h"
+#include <wifi_manager.h>
 #include "managers/sensor_manager.h"
 #include "managers/weather_manager.h"
 #include "managers/pomodoro_manager.h"
+#include "managers/cast_manager.h"
 #include "secret_config.h"
 
 // 声明状态栏图标（DataUpdateTask 需要更新图标）
@@ -209,6 +211,7 @@ void CustomLcdDisplay::DataUpdateTask(void *arg) {
                 if (self->time_label_) lv_label_set_text(self->time_label_, time_buf);
                 if (self->music_time_label_) lv_label_set_text(self->music_time_label_, time_buf);
                 if (self->pomo_time_label_) lv_label_set_text(self->pomo_time_label_, time_buf);
+                if (self->cast_time_label_) lv_label_set_text(self->cast_time_label_, time_buf);
 
                 const char *weeks_en[] = {"SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"};
                 if (self->day_label_) lv_label_set_text(self->day_label_, weeks_en[timeinfo.tm_wday]);
@@ -372,6 +375,9 @@ void CustomLcdDisplay::DataUpdateTask(void *arg) {
                         if (self->pomo_battery_icon_img_) {
                             lv_image_set_src(self->pomo_battery_icon_img_, icon_src);
                         }
+                        if (self->cast_battery_icon_img_) {
+                            lv_image_set_src(self->cast_battery_icon_img_, icon_src);
+                        }
                         last_icon_mode = icon_mode;
                     }
 
@@ -381,6 +387,7 @@ void CustomLcdDisplay::DataUpdateTask(void *arg) {
                         lv_label_set_text(self->battery_pct_label_, bat_buf);
                         if (self->music_battery_pct_label_) lv_label_set_text(self->music_battery_pct_label_, bat_buf);
                         if (self->pomo_battery_pct_label_) lv_label_set_text(self->pomo_battery_pct_label_, bat_buf);
+                        if (self->cast_battery_pct_label_) lv_label_set_text(self->cast_battery_pct_label_, bat_buf);
                         last_battery_level = cached_battery_level;
                     }
 
@@ -419,6 +426,9 @@ void CustomLcdDisplay::DataUpdateTask(void *arg) {
                     }
                     if (self->pomo_wifi_icon_img_) {
                         lv_image_set_src(self->pomo_wifi_icon_img_, wifi_src);
+                    }
+                    if (self->cast_wifi_icon_img_) {
+                        lv_image_set_src(self->cast_wifi_icon_img_, wifi_src);
                     }
                     last_wifi_state = ds;
                 }
@@ -536,6 +546,50 @@ void CustomLcdDisplay::DataUpdateTask(void *arg) {
                         lv_label_set_long_mode(self->pomo_chat_status_label_, LV_LABEL_LONG_WRAP);
                         lv_label_set_text(self->pomo_chat_status_label_, pomo_status_buf);
                     }
+                }
+            }
+        }
+
+        // ===== 无线投屏服务与第四屏状态维护 =====
+        {
+            auto& wifi = WifiManager::GetInstance();
+            const bool wifi_ready = (network_connected && wifi.IsConnected() && !wifi.IsConfigMode());
+            auto& cast_mgr = CastManager::getInstance();
+
+            if (wifi_ready && !cast_mgr.isRunning()) {
+                cast_mgr.start(self);
+            } else if ((!wifi_ready || wifi.IsConfigMode()) && cast_mgr.isRunning()) {
+                cast_mgr.stop();
+            }
+
+            cast_mgr.checkTimeout();
+
+            // 处于未连线等待状态且非系统信息滚动时，仅在文案变化时更新第四屏 IPv4 与等待提示
+            if (!self->showing_system_info_ && !cast_mgr.isStreaming()) {
+                std::string ip_str = wifi.GetIpAddress();
+                char ip_buf[64];
+                char status_buf[64];
+                char stats_buf[96];
+                if (wifi_ready && !ip_str.empty()) {
+                    snprintf(ip_buf, sizeof(ip_buf), "%s:%u", ip_str.c_str(), cast_mgr.getPort());
+                    snprintf(status_buf, sizeof(status_buf), "等待连接");
+                    snprintf(stats_buf, sizeof(stats_buf), "Wi-Fi 已就绪 · 已接收 %lu 帧",
+                             static_cast<unsigned long>(cast_mgr.getFramesReceived()));
+                } else {
+                    snprintf(ip_buf, sizeof(ip_buf), "IPv4: --.--.--.--");
+                    snprintf(status_buf, sizeof(status_buf), "等待连接（Wi-Fi 未连接）");
+                    snprintf(stats_buf, sizeof(stats_buf), "请先联网 · 监听端口 %u", cast_mgr.getPort());
+                }
+                self->UpdateCastWaitingInfo(ip_buf, status_buf, stats_buf);
+            }
+
+            // 语音通话结束回到空闲时：若当前处于投屏画面则补刷暂缓帧，并清理语音暂停标记
+            if (!in_audio_session) {
+                if (self->IsCastMode() && cast_mgr.isStreaming()) {
+                    self->FlushBufferedCastFrameIfNeeded();
+                }
+                if (cast_mgr.isAudioPaused()) {
+                    cast_mgr.clearAudioPaused();
                 }
             }
         }

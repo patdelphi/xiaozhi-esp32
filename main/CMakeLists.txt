@@ -834,6 +834,7 @@ idf_component_register(SRCS ${SOURCES}
                         efuse
                         bt
                         esp_http_client
+                        esp_http_server
                         esp_lcd
                         json
                         esp_adc

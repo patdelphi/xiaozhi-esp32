@@ -1,6 +1,7 @@
 #ifndef __RLCD_DRIVER_H__
 #define __RLCD_DRIVER_H__
 
+#include <cstddef>
 #include <cstdint>
 #include <driver/gpio.h>
 #include <driver/spi_common.h>
@@ -39,6 +40,8 @@ public:
     void RLCD_SetPixel(uint16_t x, uint16_t y, uint8_t color);
     // 将缓冲区内容刷新到屏幕
     void RLCD_Display();
+    // 接收行优先 MSB-first 1-bit 位图（1=白, 0=黑）并直接刷新到屏幕
+    bool RLCD_DisplayMono1Bit(const uint8_t *mono_buf, size_t len);
     // 设置屏幕对比度 (0x00-0x1F)
     void SetContrast(uint8_t level);
 

@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<!-- 程序说明：Waveshare ESP32-S3-RLCD-4.2 无线投屏网页端控台主页面（50/50 对称双栏模块化布局） -->
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light dark">
+  <title>ESP32-S3 RLCD 无线投屏控台</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <div class="page-shell">
+    <header class="top-bar">
+      <div class="title-block">
+        <h1>ESP32-S3 RLCD 投屏控台</h1>
+        <p class="subtitle">400×300 1-bit 单色推流 · 灰度抖动 · .env 配置</p>
+      </div>
+      <div class="quick-actions" role="group" aria-label="即时控制操作">
+        <span id="service-badge" class="badge">加载中...</span>
+        <button type="button" id="btn-test-pattern" class="btn secondary">生成测试图</button>
+        <button type="button" id="btn-push-now" class="btn secondary">立即推一帧</button>
+        <button type="button" id="btn-toggle-pause" class="btn secondary">暂停推流</button>
+        <button type="button" id="btn-disconnect" class="btn danger">断开回等待页</button>
+      </div>
+    </header>
+
+    <div id="global-status" class="status-banner" role="status" aria-live="polite"></div>
+
+    <main class="dashboard-grid">
+      <!-- 左栏（50%）：1-bit 实时预览 + 手动推图 + 运行状态与设备遥测 -->
+      <div class="column-stack">
+        <section class="panel preview-card" aria-labelledby="preview-heading">
+          <div class="section-head preview-head">
+            <h2 id="preview-heading">1-bit 实时预览（400×300）</h2>
+            <div class="preview-meta">
+              <span id="meta-sha">帧哈希：--</span>
+              <span id="meta-push-info">推送耗时：--</span>
+            </div>
+          </div>
+          <div class="screen-frame">
+            <img id="preview-img" src="/preview.png" width="400" height="300" alt="当前待发送的 400×300 单色黑白画面预览">
+          </div>
+        </section>
+
+        <section id="drop-zone" class="panel drop-zone" aria-label="手动选图或拖拽推送">
+          <div class="upload-row">
+            <label for="image-file-input" class="file-label">选图/拖拽测试</label>
+            <input type="file" id="image-file-input" accept="image/png,image/jpeg,image/bmp,image/webp">
+            <button type="button" id="btn-upload-push" class="btn primary small">上传推送</button>
+          </div>
+        </section>
+
+        <section class="panel telemetry-card" aria-labelledby="telemetry-heading">
+          <div class="sub-header">
+            <h2 id="telemetry-heading">运行状态与设备遥测</h2>
+            <button type="button" id="btn-refresh-status" class="btn small secondary">立即刷新</button>
+          </div>
+          <dl class="telemetry-grid">
+            <div><dt>已推送</dt><dd id="stat-pushed">0</dd></div>
+            <div><dt>去重跳过</dt><dd id="stat-skipped">0</dd></div>
+            <div><dt>保活心跳</dt><dd id="stat-heartbeats">0</dd></div>
+            <div><dt>失败次数</dt><dd id="stat-failed">0</dd></div>
+            <div><dt>设备页面</dt><dd id="dev-mode">--</dd></div>
+            <div><dt>投屏状态</dt><dd id="dev-streaming">--</dd></div>
+            <div><dt>FPS / 电量</dt><dd id="dev-fps-bat">--</dd></div>
+            <div><dt>Wi-Fi RSSI</dt><dd id="dev-rssi">--</dd></div>
+          </dl>
+          <p id="last-error-text" class="error-banner" hidden></p>
+        </section>
+      </div>
+
+      <!-- 右栏（50%）：.env 参数配置表单 + 上游服务推送接入示例 -->
+      <div class="column-stack">
+        <section class="panel config-card" aria-labelledby="config-heading">
+          <div class="section-head">
+            <h2 id="config-heading">后台与投屏参数配置（同步写入 .env）</h2>
+          </div>
+
+          <form id="config-form" method="POST" action="/api/config" aria-labelledby="config-heading" novalidate>
+            <fieldset>
+              <legend>设备连接参数</legend>
+
+              <div class="three-col-ip">
+                <div class="field">
+                  <div class="field-head">
+                    <label for="DEVICE_IP">设备 IPv4 <span aria-hidden="true">*</span></label>
+                    <span id="DEVICE_IP-hint" class="hint">局域网 IP</span>
+                  </div>
+                  <input
+                    type="text"
+                    id="DEVICE_IP"
+                    name="DEVICE_IP"
+                    required
+                    pattern="[A-Za-z0-9.\-:]+"
+                    autocorrect="off"
+                    autocapitalize="none"
+                    spellcheck="false"
+                    enterkeyhint="next"
+                    aria-describedby="DEVICE_IP-hint"
+                    data-error="DEVICE_IP-error"
+                  >
+                  <div id="DEVICE_IP-error" class="error-msg">
+                    <span role="img" aria-label="错误">✕</span> 请输入合法 IPv4 或主机名。
+                  </div>
+                </div>
+
+                <div class="field">
+                  <div class="field-head">
+                    <label for="DEVICE_PORT">端口 <span aria-hidden="true">*</span></label>
+                    <span id="DEVICE_PORT-hint" class="hint">1–65535</span>
+                  </div>
+                  <input
+                    type="text"
+                    inputmode="numeric"
+                    id="DEVICE_PORT"
+                    name="DEVICE_PORT"
+                    required
+                    pattern="\d{1,5}"
+                    aria-describedby="DEVICE_PORT-hint"
+                    data-error="DEVICE_PORT-error"
+                  >
+                  <div id="DEVICE_PORT-error" class="error-msg">
+                    <span role="img" aria-label="错误">✕</span> 需为 1–65535 整数。
+                  </div>
+                </div>
+
+                <div class="field">
+                  <div class="field-head">
+                    <label for="HTTP_TIMEOUT_SEC">超时(s) <span aria-hidden="true">*</span></label>
+                    <span id="HTTP_TIMEOUT_SEC-hint" class="hint">0.2–60</span>
+                  </div>
+                  <input
+                    type="text"
+                    inputmode="decimal"
+                    id="HTTP_TIMEOUT_SEC"
+                    name="HTTP_TIMEOUT_SEC"
+                    required
+                    pattern="\d+(\.\d+)?"
+                    aria-describedby="HTTP_TIMEOUT_SEC-hint"
+                    data-error="HTTP_TIMEOUT_SEC-error"
+                  >
+                  <div id="HTTP_TIMEOUT_SEC-error" class="error-msg">
+                    <span role="img" aria-label="错误">✕</span> 需为 0.2–60.0 数字。
+                  </div>
+                </div>
+              </div>
+
+              <div class="field">
+                <div class="field-head">
+                  <label for="CAST_TOKEN">鉴权 Token（可选）</label>
+                  <span id="CAST_TOKEN-hint" class="hint">对应 X-Cast-Token，留空不启用</span>
+                </div>
+                <div class="token-row">
+                  <input
+                    type="password"
+                    id="CAST_TOKEN"
+                    name="CAST_TOKEN"
+                    autocomplete="off"
+                    autocorrect="off"
+                    autocapitalize="none"
+                    spellcheck="false"
+                    aria-describedby="CAST_TOKEN-hint"
+                    data-error="CAST_TOKEN-error"
+                  >
+                  <button
+                    type="button"
+                    id="toggle-token-btn"
+                    class="btn secondary small"
+                    aria-pressed="false"
+                    aria-controls="CAST_TOKEN"
+                  >显示</button>
+                </div>
+                <div id="CAST_TOKEN-error" class="error-msg">
+                  <span role="img" aria-label="错误">✕</span> Token 不能含控制字符。
+                </div>
+              </div>
+            </fieldset>
+
+            <fieldset>
+              <legend>推送调度策略</legend>
+
+              <div class="three-col">
+                <div class="field">
+                  <div class="field-head">
+                    <label for="PUSH_INTERVAL_MS">间隔(ms) <span aria-hidden="true">*</span></label>
+                    <span id="PUSH_INTERVAL_MS-hint" class="hint">≥50</span>
+                  </div>
+                  <input
+                    type="text"
+                    inputmode="numeric"
+                    id="PUSH_INTERVAL_MS"
+                    name="PUSH_INTERVAL_MS"
+                    required
+                    pattern="\d+"
+                    aria-describedby="PUSH_INTERVAL_MS-hint"
+                    data-error="PUSH_INTERVAL_MS-error"
+                  >
+                  <div id="PUSH_INTERVAL_MS-error" class="error-msg">
+                    <span role="img" aria-label="错误">✕</span> 50–3600000 整数。
+                  </div>
+                </div>
+
+                <div class="field">
+                  <div class="field-head">
+                    <label for="CAST_TIMEOUT_SEC">回退(s) <span aria-hidden="true">*</span></label>
+                    <span id="CAST_TIMEOUT_SEC-hint" class="hint">0常驻</span>
+                  </div>
+                  <input
+                    type="text"
+                    inputmode="numeric"
+                    id="CAST_TIMEOUT_SEC"
+                    name="CAST_TIMEOUT_SEC"
+                    required
+                    pattern="\d+"
+                    aria-describedby="CAST_TIMEOUT_SEC-hint"
+                    data-error="CAST_TIMEOUT_SEC-error"
+                  >
+                  <div id="CAST_TIMEOUT_SEC-error" class="error-msg">
+                    <span role="img" aria-label="错误">✕</span> 0–86400 整数。
+                  </div>
+                </div>
+
+                <div class="field">
+                  <div class="field-head">
+                    <label for="HEARTBEAT_INTERVAL_SEC">心跳(s) <span aria-hidden="true">*</span></label>
+                    <span id="HEARTBEAT_INTERVAL_SEC-hint" class="hint">0关闭</span>
+                  </div>
+                  <input
+                    type="text"
+                    inputmode="numeric"
+                    id="HEARTBEAT_INTERVAL_SEC"
+                    name="HEARTBEAT_INTERVAL_SEC"
+                    required
+                    pattern="\d+"
+                    aria-describedby="HEARTBEAT_INTERVAL_SEC-hint"
+                    data-error="HEARTBEAT_INTERVAL_SEC-error"
+                  >
+                  <div id="HEARTBEAT_INTERVAL_SEC-error" class="error-msg">
+                    <span role="img" aria-label="错误">✕</span> 0–3600 整数。
+                  </div>
+                </div>
+              </div>
+
+              <div class="checkbox-row">
+                <div class="check-item">
+                  <input type="checkbox" id="SKIP_UNCHANGED" name="SKIP_UNCHANGED">
+                  <label for="SKIP_UNCHANGED">哈希未变跳过（SKIP_UNCHANGED）</label>
+                </div>
+                <div class="check-item">
+                  <input type="checkbox" id="AUTO_SWITCH" name="AUTO_SWITCH">
+                  <label for="AUTO_SWITCH">推图自动切第四屏（AUTO_SWITCH）</label>
+                </div>
+              </div>
+            </fieldset>
+
+            <fieldset>
+              <legend>灰度抖动与图像适配</legend>
+
+              <div class="radio-group" role="radiogroup" aria-labelledby="dither-group-label">
+                <span id="dither-group-label" class="group-title">黑白转换算法（DITHER_MODE）</span>
+                <div class="radio-row">
+                  <label class="radio-item" for="dither-floyd">
+                    <input type="radio" id="dither-floyd" name="DITHER_MODE" value="floyd">
+                    <span>Floyd 扩散</span>
+                  </label>
+                  <label class="radio-item" for="dither-atkinson">
+                    <input type="radio" id="dither-atkinson" name="DITHER_MODE" value="atkinson">
+                    <span>Atkinson</span>
+                  </label>
+                  <label class="radio-item" for="dither-bayer">
+                    <input type="radio" id="dither-bayer" name="DITHER_MODE" value="bayer">
+                    <span>Bayer 4×4</span>
+                  </label>
+                  <label class="radio-item" for="dither-threshold">
+                    <input type="radio" id="dither-threshold" name="DITHER_MODE" value="threshold">
+                    <span>硬阈值</span>
+                  </label>
+                </div>
+              </div>
+
+              <div class="two-col">
+                <div class="radio-group" role="radiogroup" aria-labelledby="fit-group-label">
+                  <span id="fit-group-label" class="group-title">缩放适配（FIT_MODE）</span>
+                  <div class="radio-row">
+                    <label class="radio-item" for="fit-contain">
+                      <input type="radio" id="fit-contain" name="FIT_MODE" value="contain">
+                      <span>Contain</span>
+                    </label>
+                    <label class="radio-item" for="fit-cover">
+                      <input type="radio" id="fit-cover" name="FIT_MODE" value="cover">
+                      <span>Cover</span>
+                    </label>
+                    <label class="radio-item" for="fit-stretch">
+                      <input type="radio" id="fit-stretch" name="FIT_MODE" value="stretch">
+                      <span>Stretch</span>
+                    </label>
+                  </div>
+                </div>
+
+                <div class="radio-group" role="radiogroup" aria-labelledby="rotate-group-label">
+                  <span id="rotate-group-label" class="group-title">顺时针旋转（ROTATE）</span>
+                  <div class="radio-row">
+                    <label class="radio-item" for="rot-0">
+                      <input type="radio" id="rot-0" name="ROTATE" value="0">
+                      <span>0°</span>
+                    </label>
+                    <label class="radio-item" for="rot-90">
+                      <input type="radio" id="rot-90" name="ROTATE" value="90">
+                      <span>90°</span>
+                    </label>
+                    <label class="radio-item" for="rot-180">
+                      <input type="radio" id="rot-180" name="ROTATE" value="180">
+                      <span>180°</span>
+                    </label>
+                    <label class="radio-item" for="rot-270">
+                      <input type="radio" id="rot-270" name="ROTATE" value="270">
+                      <span>270°</span>
+                    </label>
+                  </div>
+                </div>
+              </div>
+
+              <div class="threshold-invert-row">
+                <div class="field field-compact">
+                  <div class="field-head">
+                    <label for="THRESHOLD">二值化阈值（0–255）</label>
+                    <span id="THRESHOLD-hint" class="hint">当前：<strong id="threshold-val">128</strong></span>
+                  </div>
+                  <input
+                    type="range"
+                    id="THRESHOLD"
+                    name="THRESHOLD"
+                    min="0"
+                    max="255"
+                    value="128"
+                    aria-describedby="THRESHOLD-hint"
+                  >
+                </div>
+
+                <div class="check-item check-invert">
+                  <input type="checkbox" id="INVERT" name="INVERT">
+                  <label for="INVERT">反相（INVERT）</label>
+                </div>
+              </div>
+            </fieldset>
+
+            <div class="form-actions">
+              <button type="submit" id="btn-save-config" class="btn primary">保存配置到 .env 并刷新预览</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="panel api-card" aria-labelledby="api-heading">
+          <div class="sub-header">
+            <h2 id="api-heading">上游服务推送接入示例</h2>
+            <button type="button" id="btn-copy-curl" class="btn small secondary">复制 curl</button>
+          </div>
+          <pre id="curl-example" class="code-box"></pre>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
