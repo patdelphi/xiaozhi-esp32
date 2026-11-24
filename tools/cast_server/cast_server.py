@@ -16,11 +16,13 @@ import hashlib
 import http.client
 import io
 import json
+import os
 import re
 import signal
 import sys
 import threading
 import time
+import webbrowser
 from dataclasses import dataclass
 from email.parser import BytesParser
 from email.policy import default as email_policy_default
@@ -32,8 +34,18 @@ from urllib.parse import parse_qs, urlparse
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-BASE_DIR = Path(__file__).resolve().parent
-WEB_DIR = BASE_DIR / "web"
+def _resolve_runtime_dirs() -> Tuple[Path, Path]:
+    """解析可读写运行目录与网页静态资源目录（兼容源码运行与 PyInstaller 打包）。"""
+    if getattr(sys, "frozen", False):
+        app_dir = Path(sys.executable).resolve().parent
+        bundle_dir = Path(getattr(sys, "_MEIPASS", app_dir))
+        web_dir = (app_dir / "web") if (app_dir / "web").is_dir() else (bundle_dir / "web")
+        return app_dir, web_dir
+    src_dir = Path(__file__).resolve().parent
+    return src_dir, src_dir / "web"
+
+
+BASE_DIR, WEB_DIR = _resolve_runtime_dirs()
 MAX_UPLOAD_BYTES = 16 * 1024 * 1024  # 限制单张上游图片不超过 16 MB
 
 DITHER_MODES = ("floyd", "atkinson", "bayer", "threshold")
@@ -1047,14 +1059,115 @@ def create_http_server(service: CastService, host: str, port: int) -> CastHTTPSe
     return CastHTTPServer((host, port), service)
 
 
+def _setup_headless_stdio(log_path: Path) -> Optional[Any]:
+    """无控制台模式（console=False）下将空标准输出重定向到日志文件，避免输出报错。"""
+    if sys.stdout is not None and sys.stderr is not None:
+        return None
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_fp = open(log_path, "a", encoding="utf-8", buffering=1)
+    if sys.stdout is None:
+        sys.stdout = log_fp
+    if sys.stderr is None:
+        sys.stderr = log_fp
+    return log_fp
+
+
+def _build_tray_icon_image() -> Image.Image:
+    """生成系统托盘 64×64 图标（深色外框 + 浅白 RLCD 内屏 + 无线投屏指示）。"""
+    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    draw.rounded_rectangle((4, 8, 60, 56), radius=10, fill=(24, 34, 48, 255), outline=(66, 133, 244, 255), width=2)
+    draw.rounded_rectangle((10, 14, 54, 50), radius=4, fill=(242, 246, 250, 255))
+    # 右上信号弧线 + 左下投屏基点
+    draw.ellipse((15, 37, 25, 47), fill=(18, 24, 32, 255))
+    draw.arc((12, 26, 36, 50), start=270, end=360, fill=(18, 24, 32, 255), width=3)
+    draw.arc((10, 18, 46, 54), start=270, end=360, fill=(37, 99, 235, 255), width=3)
+    return img
+
+
+def _should_use_tray(args_tray: bool, args_no_tray: bool, is_frozen: bool) -> bool:
+    """判断是否启用 Windows 系统托盘常驻模式。"""
+    if args_no_tray:
+        return False
+    if args_tray:
+        return True
+    return bool(is_frozen)
+
+
+def _run_with_tray(httpd: CastHTTPServer, service: CastService, log_path: Path) -> None:
+    """后台线程运行 HTTP 服务，主线程挂载系统托盘图标并支持双击打开控台。"""
+    server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    server_thread.start()
+
+    console_url = f"http://127.0.0.1:{httpd.server_port}/"
+    try:
+        import pystray
+
+        def _open_console(*_args: Any) -> None:
+            try:
+                webbrowser.open(console_url)
+            except Exception as exc:
+                print(f"[警告] 打开控台浏览器失败: {exc}")
+
+        def _open_log(*_args: Any) -> None:
+            try:
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                if not log_path.exists():
+                    log_path.write_text("", encoding="utf-8")
+                if sys.stdout is not None:
+                    sys.stdout.flush()
+                if os.name == "nt" and hasattr(os, "startfile"):
+                    os.startfile(str(log_path))
+                else:
+                    webbrowser.open(log_path.as_uri())
+            except Exception as exc:
+                print(f"[警告] 打开运行日志失败: {exc}")
+
+        def _quit_app(icon_obj: Any, *_args: Any) -> None:
+            try:
+                httpd.shutdown()
+            except Exception:
+                pass
+            try:
+                icon_obj.stop()
+            except Exception:
+                pass
+
+        menu = pystray.Menu(
+            pystray.MenuItem("打开网页控台", _open_console, default=True),
+            pystray.MenuItem("查看运行日志", _open_log),
+            pystray.MenuItem("退出", _quit_app),
+        )
+        icon = pystray.Icon(
+            "rlcd_cast_server",
+            _build_tray_icon_image(),
+            f"RLCD 无线投屏服务 ({httpd.server_port})",
+            menu,
+        )
+        icon.run()
+    except Exception as exc:
+        print(f"[警告] 系统托盘不可用，回退无托盘常驻模式: {exc}")
+        while server_thread.is_alive():
+            server_thread.join(timeout=0.5)
+
+
 def main() -> int:
     """命令行入口：加载 .env（不存在时自动从 .env.example 初始化）并启动网页端控台服务。"""
     parser = argparse.ArgumentParser(description="Waveshare ESP32-S3-RLCD-4.2 无线投屏后台与网页端控台")
     parser.add_argument("--env", default=str(BASE_DIR / ".env"), help=".env 配置文件路径")
+    parser.add_argument("--tray", action="store_true", help="强制启用系统托盘图标运行")
+    parser.add_argument("--no-tray", action="store_true", help="禁用系统托盘图标（前景阻塞运行）")
     args = parser.parse_args()
 
-    env_path = Path(args.env)
-    example_path = BASE_DIR / ".env.example"
+    env_path = Path(args.env).resolve()
+    log_path = env_path.parent / "cast_server.log"
+    log_fp = _setup_headless_stdio(log_path)
+
+    example_candidates = [
+        BASE_DIR / ".env.example",
+        Path(getattr(sys, "_MEIPASS", BASE_DIR)) / ".env.example",
+    ]
+    example_path = next((p for p in example_candidates if p.exists()), example_candidates[0])
     if not env_path.exists() and example_path.exists():
         env_path.write_text(example_path.read_text(encoding="utf-8"), encoding="utf-8")
 
@@ -1073,12 +1186,25 @@ def main() -> int:
     print(f"目标设备地址: http://{cfg['DEVICE_IP']}:{cfg['DEVICE_PORT']}/api/cast/frame")
 
     try:
-        httpd.serve_forever()
+        if _should_use_tray(args.tray, args.no_tray, bool(getattr(sys, "frozen", False))):
+            _run_with_tray(httpd, service, log_path)
+        else:
+            httpd.serve_forever()
     except KeyboardInterrupt:
         print("\n正在停止投屏后台服务...")
     finally:
+        try:
+            httpd.shutdown()
+        except Exception:
+            pass
         httpd.server_close()
         service.stop()
+        if log_fp is not None:
+            try:
+                log_fp.flush()
+                log_fp.close()
+            except Exception:
+                pass
     return 0
 
 

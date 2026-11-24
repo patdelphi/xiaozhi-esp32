@@ -646,6 +646,57 @@ class TestCastWebConsoleAndPushIntegration(unittest.TestCase):
             self.assertIn("400 Bad Request", resp_raw)
             self.assertIn("Connection: close", resp_raw)
 
+    def test_resolve_runtime_dirs_source_and_frozen(self):
+        # 源码运行模式：指向脚本目录及同级 web/
+        src_base, src_web = cast_server._resolve_runtime_dirs()
+        self.assertEqual(src_base, SERVER_DIR)
+        self.assertEqual(src_web, SERVER_DIR / "web")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            exe_dir = root / "app"
+            meipass_dir = root / "bundle"
+            exe_dir.mkdir(parents=True)
+            (meipass_dir / "web").mkdir(parents=True)
+            fake_exe = exe_dir / "CastServer.exe"
+            fake_exe.write_bytes(b"")
+
+            # 打包模式默认读取 _MEIPASS/web，配置落在 exe 同级目录
+            with patch.object(sys, "frozen", True, create=True), \
+                 patch.object(sys, "executable", str(fake_exe)), \
+                 patch.object(sys, "_MEIPASS", str(meipass_dir), create=True):
+                app_base, app_web = cast_server._resolve_runtime_dirs()
+                self.assertEqual(app_base, exe_dir.resolve())
+                self.assertEqual(app_web, meipass_dir / "web")
+
+                # 若 exe 同级放置自定义 web/ 目录，应优先覆盖内置资源
+                (exe_dir / "web").mkdir()
+                app_base2, app_web2 = cast_server._resolve_runtime_dirs()
+                self.assertEqual(app_base2, exe_dir.resolve())
+                self.assertEqual(app_web2, exe_dir.resolve() / "web")
+
+    def test_tray_helpers_icon_and_mode_selection(self):
+        icon_img = cast_server._build_tray_icon_image()
+        self.assertEqual(icon_img.size, (64, 64))
+        self.assertEqual(icon_img.mode, "RGBA")
+
+        self.assertFalse(cast_server._should_use_tray(False, False, is_frozen=False))
+        self.assertTrue(cast_server._should_use_tray(False, False, is_frozen=True))
+        self.assertTrue(cast_server._should_use_tray(True, False, is_frozen=False))
+        self.assertFalse(cast_server._should_use_tray(True, True, is_frozen=True))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "cast_server.log"
+            with patch.object(sys, "stdout", None), patch.object(sys, "stderr", None):
+                fp = cast_server._setup_headless_stdio(log_path)
+                try:
+                    self.assertIsNotNone(fp)
+                    print("headless stdio ok")
+                finally:
+                    if fp is not None:
+                        fp.close()
+            self.assertIn("headless stdio ok", log_path.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

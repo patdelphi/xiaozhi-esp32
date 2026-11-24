@@ -148,7 +148,7 @@ function Select-SerialPort {
         Write-Host ""
         Write-Host "  检测到的串口列表:" -ForegroundColor Cyan
         if ($ports.Count -eq 0) {
-            Write-Host "  [提示] 未发现 COM 端口。请确认 USB 数据线已插好，或按住 BOOT + 点按 RESET 进入下载模式。" -ForegroundColor Yellow
+            Write-Host "  [提示] 未发现 COM 端口。请确认 USB 数据线已插好，或按住 BOOT(GPIO0) 不放并重新插拔 Type-C 上电（电池供电时可长按 PWR 关机后按住 BOOT 上电）。" -ForegroundColor Yellow
         } else {
             for ($i = 0; $i -lt $ports.Count; $i++) {
                 Write-Host "  [$($i + 1)] $($ports[$i].Port)  - $($ports[$i].Description)" -ForegroundColor White
@@ -228,7 +228,7 @@ function Show-FlashTroubleShooting {
     Write-Host ""
     Write-Host "  [排查提示]" -ForegroundColor Yellow
     Write-Host "  1. 请使用支持数据传输的 USB Type-C 数据线连接开发板串口/USB口。"
-    Write-Host "  2. 若提示无法连接或等待下载超时: 按住 BOOT(GPIO0) -> 点按 RESET -> 松开 BOOT 后重试。"
+    Write-Host "  2. 若提示无法连接或等待下载超时: 按住 BOOT(GPIO0) 不放并重新插拔 Type-C 上电（电池供电时可长按 PWR 关机后按住 BOOT 上电），保持 1-2 秒后松开 BOOT 重试。"
     Write-Host "  3. 请关闭占用同一 COM 口的串口助手、Arduino IDE、idf.py monitor 等软件。"
     Write-Host "  4. 若高波特率通信丢包，可重试并改用 115200 波特率。"
 }
