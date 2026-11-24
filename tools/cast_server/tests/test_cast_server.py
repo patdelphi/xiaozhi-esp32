@@ -229,14 +229,41 @@ class TestEnvConfig(unittest.TestCase):
             env_path = Path(tmpdir) / ".env"
             env_path.write_text(
                 'DEVICE_IP=192.168.1.55  # 客厅设备\n'
-                'CAST_TOKEN="tok#with#hash" # 行内注释\n'
+                'CAST_TOKEN=             # 可选鉴权令牌（留空表示不启用）\n'
                 "DITHER_MODE='atkinson' # 抖动算法\n",
                 encoding="utf-8",
             )
             cfg = cast_server.load_env_config(env_path)
             self.assertEqual(cfg["DEVICE_IP"], "192.168.1.55")
-            self.assertEqual(cfg["CAST_TOKEN"], "tok#with#hash")
+            self.assertEqual(cfg["CAST_TOKEN"], "")
             self.assertEqual(cfg["DITHER_MODE"], "atkinson")
+
+            env_path.write_text(
+                'CAST_TOKEN="tok#with#hash" # 行内注释\n',
+                encoding="utf-8",
+            )
+            cfg2 = cast_server.load_env_config(env_path)
+            self.assertEqual(cfg2["CAST_TOKEN"], "tok#with#hash")
+
+    def test_save_env_config_writes_comments_and_roundtrips(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_path = Path(tmpdir) / ".env"
+            cast_server.save_env_config(env_path, {**cast_server.DEFAULT_CONFIG, "DEVICE_IP": "10.0.0.8"})
+            raw = env_path.read_bytes()
+            # 必须无 UTF-8 BOM 且使用 CRLF
+            self.assertFalse(raw.startswith(b"\xef\xbb\xbf"))
+            self.assertIn(b"\r\n", raw)
+
+            text = env_path.read_text(encoding="utf-8")
+            for key in cast_server.CONFIG_ORDER:
+                line = next((ln for ln in text.splitlines() if ln.startswith(f"{key}=")), None)
+                self.assertIsNotNone(line, f"缺少配置键 {key}")
+                self.assertIn("#", line, f"配置项 {key} 缺少行内备注: {line}")
+
+            reloaded = cast_server.load_env_config(env_path)
+            self.assertEqual(reloaded["DEVICE_IP"], "10.0.0.8")
+            self.assertEqual(reloaded["CAST_TOKEN"], "")
+            self.assertEqual(reloaded["LISTEN_PORT"], 8787)
 
 
 class TestImagePipeline(unittest.TestCase):

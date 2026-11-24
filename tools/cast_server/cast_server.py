@@ -75,6 +75,34 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 
 CONFIG_ORDER = list(DEFAULT_CONFIG.keys())
 
+CONFIG_SECTIONS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    ("设备连接配置", ("DEVICE_IP", "DEVICE_PORT", "CAST_TOKEN", "HTTP_TIMEOUT_SEC")),
+    ("后台与网页控台监听配置", ("LISTEN_HOST", "LISTEN_PORT")),
+    ("推送调度策略", ("PUSH_INTERVAL_MS", "SKIP_UNCHANGED", "HEARTBEAT_INTERVAL_SEC", "CAST_TIMEOUT_SEC", "AUTO_SWITCH")),
+    ("屏幕与灰度转换配置", ("SCREEN_WIDTH", "SCREEN_HEIGHT", "DITHER_MODE", "THRESHOLD", "FIT_MODE", "ROTATE", "INVERT")),
+)
+
+CONFIG_COMMENTS: Dict[str, str] = {
+    "DEVICE_IP": "设备端（ESP32-S3-RLCD-4.2 第四屏）显示的 IPv4 地址",
+    "DEVICE_PORT": "设备端内置投屏接收服务 HTTP 端口（固定 8080）",
+    "CAST_TOKEN": "可选鉴权令牌（需与固件 secret_config.h 中一致，留空表示不启用）",
+    "HTTP_TIMEOUT_SEC": "向设备推送单帧或查询状态的 HTTP 超时时间（秒）",
+    "LISTEN_HOST": "本控台服务绑定地址（0.0.0.0 允许局域网访问 / 127.0.0.1 仅本机）",
+    "LISTEN_PORT": "后台收图与网页端控台访问端口（默认 8787）",
+    "PUSH_INTERVAL_MS": "定时向设备推帧的最小间隔（毫秒，建议 200-2000）",
+    "SKIP_UNCHANGED": "相同帧哈希去重跳过：true 省流防闪烁 / false 每次强制重刷",
+    "HEARTBEAT_INTERVAL_SEC": "空闲无新帧时发送保活心跳的间隔（秒，0 表示关闭）",
+    "CAST_TIMEOUT_SEC": "通知设备端投屏超时自动退回等待页的时长（秒，0 表示不超时）",
+    "AUTO_SWITCH": "收到画面时是否请求设备自动切至第 4 屏（true/false）",
+    "SCREEN_WIDTH": "目标设备屏幕宽度像素（必须为 8 的倍数，本板默认 400）",
+    "SCREEN_HEIGHT": "目标设备屏幕高度像素（本板默认 300）",
+    "DITHER_MODE": "1-bit 黑白转换算法：floyd / atkinson / bayer / threshold",
+    "THRESHOLD": "二值化灰度阈值（0-255，默认 128）",
+    "FIT_MODE": "画面缩放裁剪模式：contain 等比留白 / cover 等比裁切 / stretch 拉伸",
+    "ROTATE": "画面顺时针旋转角度：0 / 90 / 180 / 270",
+    "INVERT": "黑白反相显示：false 白底黑字 / true 黑底白字",
+}
+
 # 4x4 有序 Bayer 矩阵，映射到 0..255 像素比较区间
 _BAYER_4X4 = (
     (8, 136, 40, 168),
@@ -279,29 +307,51 @@ def load_env_config(env_path: Path) -> Dict[str, Any]:
                     if not trailing or trailing.startswith("#"):
                         val = val[1:end_idx]
             else:
-                # 仅剥离非引号包裹值右侧的行内注释，避免配置值混入注释文本
-                val = re.split(r"\s+#", val, maxsplit=1)[0].strip()
+                # 仅剥离非引号包裹值右侧的行内注释，避免空值+注释或配置值混入注释文本
+                if val.startswith("#"):
+                    val = ""
+                else:
+                    val = re.split(r"\s+#", val, maxsplit=1)[0].strip()
             if key in DEFAULT_CONFIG:
                 parsed[key] = val
     return validate_config(parsed)
 
 
 def save_env_config(env_path: Path, config: Dict[str, Any]) -> Dict[str, Any]:
-    """校验并按规范格式将配置写入 .env 文件（UTF-8 无 BOM）。"""
+    """校验并按规范格式将配置写入 .env 文件（UTF-8 无 BOM + CRLF，保留中文备注）。"""
     clean = validate_config(config)
     lines = [
-        "# Waveshare ESP32-S3-RLCD-4.2 无线投屏运行配置（由后台控台自动维护）",
-        "",
+        "# 程序说明：Waveshare ESP32-S3-RLCD-4.2 无线投屏后台与网页端控台配置（由后台控台自动维护）",
+        "# 说明：可手动编辑或通过网页端控台保存；行尾 # 后内容为参数备注",
     ]
+    seen_keys = set()
+    for section_title, keys in CONFIG_SECTIONS:
+        lines.append("")
+        lines.append(f"# {section_title}")
+        for key in keys:
+            seen_keys.add(key)
+            val = clean[key]
+            serialized = ("true" if val else "false") if isinstance(val, bool) else str(val)
+            entry = f"{key}={serialized}"
+            comment = CONFIG_COMMENTS.get(key)
+            if comment:
+                lines.append(f"{entry:<28}# {comment}")
+            else:
+                lines.append(entry)
+
+    # 兜底输出尚未归类到分组中的配置键，避免配置丢失
     for key in CONFIG_ORDER:
+        if key in seen_keys:
+            continue
         val = clean[key]
-        if isinstance(val, bool):
-            serialized = "true" if val else "false"
-        else:
-            serialized = str(val)
-        lines.append(f"{key}={serialized}")
+        serialized = ("true" if val else "false") if isinstance(val, bool) else str(val)
+        entry = f"{key}={serialized}"
+        comment = CONFIG_COMMENTS.get(key)
+        lines.append(f"{entry:<28}# {comment}" if comment else entry)
+
     env_path.parent.mkdir(parents=True, exist_ok=True)
-    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    with open(env_path, "w", encoding="utf-8", newline="") as fp:
+        fp.write("\r\n".join(lines) + "\r\n")
     return clean
 
 

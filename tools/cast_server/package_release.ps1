@@ -101,6 +101,7 @@ function Prepare-Quote0EnvFile {
     $lines = @(($raw -replace "`r`n", "`n") -split "`n")
 
     $hasEnabled = $false
+    $hasInterval = $false
     $updatedLines = New-Object System.Collections.Generic.List[string]
     foreach ($line in $lines) {
         if ($line -match "^(\s*(?:export\s+)?)RLCD_CAST_ENABLED\s*=([^#]*)(#.*)?$") {
@@ -109,6 +110,9 @@ function Prepare-Quote0EnvFile {
             $comment = if ($matches[3]) { " " + $matches[3].TrimStart() } else { "" }
             $updatedLines.Add("${prefix}RLCD_CAST_ENABLED=1${comment}")
         } else {
+            if ($line -match "^\s*(?:export\s+)?RLCD_CAST_INTERVAL\s*=") {
+                $hasInterval = $true
+            }
             $updatedLines.Add($line)
         }
     }
@@ -118,14 +122,17 @@ function Prepare-Quote0EnvFile {
             $updatedLines.Add("")
         }
         $updatedLines.Add("# ESP32-S3 RLCD 无线投屏自动推送配置（随 release 发布包默认开启）")
-        $updatedLines.Add("export RLCD_CAST_ENABLED=1")
-        $updatedLines.Add('export RLCD_CAST_URL="http://127.0.0.1:8787/push"')
-        $updatedLines.Add("export RLCD_CAST_WIDTH=400")
-        $updatedLines.Add("export RLCD_CAST_HEIGHT=300")
-        $updatedLines.Add('export RLCD_CAST_TEMPLATE="sync"')
-        $updatedLines.Add("export RLCD_CAST_INVERT=0")
-        $updatedLines.Add("export RLCD_CAST_PUSH_NOW=1")
-        $updatedLines.Add("export RLCD_CAST_TIMEOUT=5")
+        $updatedLines.Add("export RLCD_CAST_ENABLED=1                         # 开关：0=关闭，1=开启自动推送")
+        $updatedLines.Add('export RLCD_CAST_URL="http://127.0.0.1:8787/push"  # 无线投屏后台 /push 地址（支持仅填根地址）')
+        $updatedLines.Add("export RLCD_CAST_WIDTH=400                         # 渲染宽度像素（默认 400）")
+        $updatedLines.Add("export RLCD_CAST_HEIGHT=300                        # 渲染高度像素（默认 300）")
+        $updatedLines.Add('export RLCD_CAST_TEMPLATE="sync"                   # 模板：sync 跟随窗口 / bar 进度条 / ring 圆环')
+        $updatedLines.Add("export RLCD_CAST_INVERT=0                          # 反显：0 白底黑字 / 1 黑底白字")
+        $updatedLines.Add("export RLCD_CAST_PUSH_NOW=1                        # 推送时附带 push_now=1 立即刷屏")
+        $updatedLines.Add("export RLCD_CAST_TIMEOUT=5                         # HTTP 推送超时（秒）")
+        $updatedLines.Add("export RLCD_CAST_INTERVAL=1                        # 定时推送间隔（秒），默认 1 秒，0=关闭定时重推")
+    } elseif (-not $hasInterval) {
+        $updatedLines.Add("export RLCD_CAST_INTERVAL=1                        # 定时推送间隔（秒），默认 1 秒，0=关闭定时重推")
     }
 
     # local_app.py 使用 utf-8 读取 .env，必须写入无 BOM 的 UTF-8
