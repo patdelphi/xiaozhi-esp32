@@ -13,6 +13,7 @@
 
 import io
 import json
+import os
 import socket
 import sys
 import tempfile
@@ -723,6 +724,62 @@ class TestCastWebConsoleAndPushIntegration(unittest.TestCase):
                     if fp is not None:
                         fp.close()
             self.assertIn("headless stdio ok", log_path.read_text(encoding="utf-8"))
+
+    def test_headless_stdio_falls_back_when_primary_log_denied(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            primary_log = root / "locked" / "cast_server.log"
+            local_appdata = root / "localappdata"
+            real_open = open
+
+            def deny_primary_open(file, *args, **kwargs):
+                if Path(file) == primary_log:
+                    raise PermissionError(13, "Permission denied", str(file))
+                return real_open(file, *args, **kwargs)
+
+            with patch.dict(os.environ, {"LOCALAPPDATA": str(local_appdata)}), \
+                 patch("builtins.open", side_effect=deny_primary_open), \
+                 patch.object(sys, "stdout", None), \
+                 patch.object(sys, "stderr", None):
+                fp = cast_server._setup_headless_stdio(primary_log)
+                try:
+                    self.assertIsNotNone(fp)
+                    print("fallback stdio ok")
+                finally:
+                    if fp is not None:
+                        fp.close()
+
+            fallback_log = local_appdata / "CastServer" / "cast_server.log"
+            self.assertTrue(fallback_log.exists())
+            content = fallback_log.read_text(encoding="utf-8")
+            self.assertIn("已回退到", content)
+            self.assertIn("fallback stdio ok", content)
+
+            with patch("builtins.open", side_effect=PermissionError(13, "all denied")), \
+                 patch.object(sys, "stdout", None), \
+                 patch.object(sys, "stderr", None):
+                fp2 = cast_server._setup_headless_stdio(primary_log)
+                try:
+                    self.assertIsInstance(fp2, io.StringIO)
+                    print("memory stdio ok")
+                    self.assertIn("memory stdio ok", fp2.getvalue())
+                finally:
+                    if fp2 is not None:
+                        fp2.close()
+
+    def test_main_returns_1_when_port_already_in_use(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env_file = root / ".env"
+            env_file.write_text("LISTEN_HOST=127.0.0.1\nLISTEN_PORT=18787\n", encoding="utf-8")
+            with patch.object(sys, "argv", ["cast_server.py", "--env", str(env_file), "--no-tray"]), \
+                 patch.object(sys, "stdout", None), \
+                 patch.object(sys, "stderr", None), \
+                 patch.object(cast_server, "create_http_server", side_effect=OSError(10048, "Address already in use")):
+                rc = cast_server.main()
+            self.assertEqual(rc, 1)
+            log_text = (root / "cast_server.log").read_text(encoding="utf-8")
+            self.assertIn("无法启动服务监听", log_text)
 
 
 if __name__ == "__main__":

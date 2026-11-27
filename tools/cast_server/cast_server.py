@@ -20,6 +20,7 @@ import os
 import re
 import signal
 import sys
+import tempfile
 import threading
 import time
 import webbrowser
@@ -1110,15 +1111,59 @@ def create_http_server(service: CastService, host: str, port: int) -> CastHTTPSe
 
 
 def _setup_headless_stdio(log_path: Path) -> Optional[Any]:
-    """无控制台模式（console=False）下将空标准输出重定向到日志文件，避免输出报错。"""
+    """无控制台模式（console=False）下将空标准输出重定向到日志文件，主路径不可写时自动回退。"""
     if sys.stdout is not None and sys.stderr is not None:
         return None
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_fp = open(log_path, "a", encoding="utf-8", buffering=1)
+
+    candidates = [log_path]
+    local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
+    if local_appdata:
+        candidates.append(Path(local_appdata) / "CastServer" / log_path.name)
+    candidates.append(Path(tempfile.gettempdir()) / log_path.name)
+    candidates.append(Path(os.devnull))
+
+    # 按顺序去重，避免主目录被云盘锁定或只读时启动崩溃
+    unique_candidates = []
+    seen = set()
+    for item in candidates:
+        key = str(item)
+        if key not in seen:
+            seen.add(key)
+            unique_candidates.append(item)
+
+    log_fp: Optional[Any] = None
+    opened_path: Optional[Path] = None
+    first_err: Optional[OSError] = None
+    for candidate in unique_candidates:
+        try:
+            if str(candidate) != os.devnull:
+                candidate.parent.mkdir(parents=True, exist_ok=True)
+            log_fp = open(candidate, "a", encoding="utf-8", buffering=1)
+            opened_path = candidate
+            break
+        except OSError as exc:
+            if first_err is None:
+                first_err = exc
+
+    if log_fp is None:
+        log_fp = io.StringIO()
+
     if sys.stdout is None:
         sys.stdout = log_fp
     if sys.stderr is None:
         sys.stderr = log_fp
+
+    if (
+        first_err is not None
+        and opened_path is not None
+        and str(opened_path) != str(log_path)
+        and str(opened_path) != os.devnull
+    ):
+        try:
+            log_fp.write(f"[警告] 无法写入主日志文件 {log_path} ({first_err})，已回退到: {opened_path}\n")
+            log_fp.flush()
+        except Exception:
+            pass
     return log_fp
 
 
@@ -1212,6 +1257,8 @@ def main() -> int:
     env_path = Path(args.env).resolve()
     log_path = env_path.parent / "cast_server.log"
     log_fp = _setup_headless_stdio(log_path)
+    fp_name = getattr(log_fp, "name", None)
+    active_log_path = Path(fp_name) if isinstance(fp_name, str) and fp_name != os.devnull else log_path
 
     example_candidates = [
         BASE_DIR / ".env.example",
@@ -1219,11 +1266,24 @@ def main() -> int:
     ]
     example_path = next((p for p in example_candidates if p.exists()), example_candidates[0])
     if not env_path.exists() and example_path.exists():
-        env_path.write_text(example_path.read_text(encoding="utf-8"), encoding="utf-8")
+        try:
+            env_path.write_text(example_path.read_text(encoding="utf-8"), encoding="utf-8")
+        except OSError as exc:
+            print(f"[警告] 无法初始化配置文件 {env_path}: {exc}，将使用默认配置")
 
     service = CastService(env_path)
     cfg = service.get_config()
-    httpd = create_http_server(service, cfg["LISTEN_HOST"], int(cfg["LISTEN_PORT"]))
+    try:
+        httpd = create_http_server(service, cfg["LISTEN_HOST"], int(cfg["LISTEN_PORT"]))
+    except OSError as exc:
+        print(f"[错误] 无法启动服务监听 {cfg['LISTEN_HOST']}:{cfg['LISTEN_PORT']} ({exc})，请检查端口是否已被现有 CastServer 实例占用")
+        if log_fp is not None:
+            try:
+                log_fp.flush()
+                log_fp.close()
+            except Exception:
+                pass
+        return 1
 
     def _shutdown_handler(signum, frame):
         raise KeyboardInterrupt()
@@ -1237,7 +1297,7 @@ def main() -> int:
 
     try:
         if _should_use_tray(args.tray, args.no_tray, bool(getattr(sys, "frozen", False))):
-            _run_with_tray(httpd, service, log_path)
+            _run_with_tray(httpd, service, active_log_path)
         else:
             httpd.serve_forever()
     except KeyboardInterrupt:
