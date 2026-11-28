@@ -30,14 +30,14 @@ $ErrorActionPreference = "Stop"
 $script:ProjectRoot = $PSScriptRoot
 $script:ProjectName = "xiaozhi-rlcd42"
 $script:BinaryName  = "xiaozhi"
-$script:BoardName   = "waveshare-s3-rlcd-4.2"
-$script:BoardType   = "waveshare-s3-rlcd-4.2"
+$script:BoardName   = "esp32-s3-rlcd-4.2"
+$script:BoardType   = "waveshare/esp32-s3-rlcd-4.2"
 $script:Chip        = "esp32s3"
 $script:FlashMode   = "dio"
 $script:FlashSize   = "16MB"
 $script:FlashFreq   = "80m"
 $script:AppOffset   = "0x20000"
-$script:AssetsOffset = "0xa00000"
+$script:AssetsOffset = "0x800000"
 $script:CmdExe      = "C:\WINDOWS\System32\cmd.exe"
 $script:BuildDir    = Join-Path $script:ProjectRoot "build"
 $script:DefaultPackageDir = Join-Path $script:ProjectRoot "flash_package"
@@ -217,21 +217,62 @@ function Load-IDF {
         return
     }
 
-    # 优先补全本机 D:\Espressif / D:\esp 默认环境变量，确保 export.ps1 可解析正确目录
-    if ([string]::IsNullOrWhiteSpace($env:IDF_TOOLS_PATH) -and (Test-Path -LiteralPath "D:\Espressif")) {
-        $env:IDF_TOOLS_PATH = "D:\Espressif"
-    }
-    if ([string]::IsNullOrWhiteSpace($env:IDF_PATH) -and (Test-Path -LiteralPath "D:\esp\v5.5.4\esp-idf")) {
-        $env:IDF_PATH = "D:\esp\v5.5.4\esp-idf"
+    # 固定 ComSpec 为 cmd.exe，防止 Ninja 子规则错误调用 PowerShell 执行 cd /D
+    if (Test-Path -LiteralPath $script:CmdExe) {
+        $env:ComSpec = $script:CmdExe
     }
 
-    # 优先使用官方 export.ps1，避免误用旧机器遗留硬编码 C:\ 的 PowerShell_profile.ps1
+    # 本工程基于 xiaozhi v2.6.0（要求 ESP-IDF >= 6.0.1）；若当前会话仍继承了旧版 v5.x，自动切换到本机 v6.0.1
+    $fastIdfPath = "D:\esp\v6.0.1\esp-idf"
+    $fastToolsDir = "D:\Espressif\tools"
+    $fastVenv = Join-Path $fastToolsDir "python\v6.0.1\venv"
+    $fastPy = Join-Path $fastVenv "Scripts\python.exe"
+    $legacyIdf = (-not [string]::IsNullOrWhiteSpace($env:IDF_PATH)) -and ($env:IDF_PATH -match "v[1-5]\.")
+    if (($legacyIdf -or [string]::IsNullOrWhiteSpace($env:IDF_PATH) -or $env:IDF_PATH -eq $fastIdfPath) -and
+        (Test-Path -LiteralPath $fastIdfPath) -and (Test-Path -LiteralPath $fastPy)) {
+        $env:IDF_PATH = $fastIdfPath
+        $env:IDF_TOOLS_PATH = $fastToolsDir
+        $env:IDF_COMPONENT_LOCAL_STORAGE_URL = "file://$fastToolsDir"
+        $env:IDF_PYTHON_ENV_PATH = $fastVenv
+        $env:ESP_IDF_VERSION = "6.0.1"
+        $env:ESP_ROM_ELF_DIR = Join-Path $fastToolsDir "esp-rom-elfs\20241011"
+        $env:OPENOCD_SCRIPTS = Join-Path $fastToolsDir "openocd-esp32\v0.12.0-esp32-20260304\openocd-esp32\share\openocd\scripts"
+
+        $toolBins = @(
+            "$fastToolsDir\ccache\4.12.1\ccache-4.12.1-windows-x86_64",
+            "$fastToolsDir\cmake\4.0.3\bin",
+            "$fastToolsDir\ninja\1.12.1",
+            "$fastToolsDir\dfu-util\0.11\dfu-util-0.11-win64",
+            "$fastToolsDir\esp-clang\esp-20.1.1_20250829\esp-clang\bin",
+            "$fastToolsDir\esp-rom-elfs\20241011",
+            "$fastToolsDir\esp32ulp-elf\2.38_20240113\esp32ulp-elf\bin",
+            "$fastToolsDir\idf-exe\1.0.3",
+            "$fastToolsDir\openocd-esp32\v0.12.0-esp32-20260304\openocd-esp32\bin",
+            "$fastToolsDir\riscv32-esp-elf\esp-15.2.0_20251204\riscv32-esp-elf\bin",
+            "$fastToolsDir\xtensa-esp-elf-gdb\16.3_20250913\xtensa-esp-elf-gdb\bin",
+            "$fastToolsDir\xtensa-esp-elf\esp-15.2.0_20251204\xtensa-esp-elf\bin",
+            "$fastVenv\Scripts",
+            "$fastIdfPath\tools"
+        ) | Where-Object { Test-Path -LiteralPath $_ }
+        $env:PATH = ($toolBins -join ";") + ";" + $env:PATH
+        Write-Host "  [信息] 加载 ESP-IDF v6.0.1 工具链: $fastIdfPath" -ForegroundColor Gray
+        $script:IdfLoaded = $true
+        return
+    }
+
+    if ([string]::IsNullOrWhiteSpace($env:IDF_TOOLS_PATH) -and (Test-Path -LiteralPath "D:\Espressif\tools")) {
+        $env:IDF_TOOLS_PATH = "D:\Espressif\tools"
+    }
+    if ([string]::IsNullOrWhiteSpace($env:IDF_PATH) -and (Test-Path -LiteralPath $fastIdfPath)) {
+        $env:IDF_PATH = $fastIdfPath
+    }
+
     $exportCandidates = @()
     if (-not [string]::IsNullOrWhiteSpace($env:IDF_PATH)) {
         $exportCandidates += (Join-Path $env:IDF_PATH "export.ps1")
     }
-    $exportCandidates += "D:\esp\v5.5.4\esp-idf\export.ps1"
-    $exportCandidates += "C:\esp\v5.5.4\esp-idf\export.ps1"
+    $exportCandidates += "D:\esp\v6.0.1\esp-idf\export.ps1"
+    $exportCandidates += "C:\esp\v6.0.1\esp-idf\export.ps1"
 
     $chosenScript = $null
     foreach ($cand in $exportCandidates) {
@@ -242,38 +283,10 @@ function Load-IDF {
     }
 
     if ($null -eq $chosenScript) {
-        $profileCandidates = @()
-        if (-not [string]::IsNullOrWhiteSpace($env:IDF_TOOLS_PATH)) {
-            $profileCandidates += (Join-Path $env:IDF_TOOLS_PATH "tools\Microsoft.v5.5.4.PowerShell_profile.ps1")
-        }
-        $profileCandidates += "D:\Espressif\tools\Microsoft.v5.5.4.PowerShell_profile.ps1"
-        $profileCandidates += "C:\Espressif\tools\Microsoft.v5.5.4.PowerShell_profile.ps1"
-
-        foreach ($prof in $profileCandidates) {
-            if ([string]::IsNullOrWhiteSpace($prof) -or -not (Test-Path -LiteralPath $prof)) {
-                continue
-            }
-            $profRaw = Get-Content -LiteralPath $prof -Raw
-            $badCTools = ($profRaw -match "C:\\Espressif") -and (-not (Test-Path -LiteralPath "C:\Espressif"))
-            $badCEsp   = ($profRaw -match "C:\\esp") -and (-not (Test-Path -LiteralPath "C:\esp"))
-            if (-not $badCTools -and -not $badCEsp) {
-                $chosenScript = $prof
-                break
-            }
-        }
-    }
-
-    if ($null -eq $chosenScript) {
-        throw "未找到可用的 ESP-IDF 激活脚本，请检查 D:\esp\v5.5.4\esp-idf\export.ps1 或 IDF_PATH / IDF_TOOLS_PATH 环境变量。"
+        throw "未找到可用的 ESP-IDF 激活脚本，请检查 D:\esp\v6.0.1\esp-idf\export.ps1 或 IDF_PATH / IDF_TOOLS_PATH 环境变量。"
     }
 
     Write-Host "  [信息] 加载 ESP-IDF 环境: $chosenScript" -ForegroundColor Gray
-
-    # 固定 ComSpec 为 cmd.exe，防止 Ninja 子规则错误调用 PowerShell 执行 cd /D
-    if (Test-Path -LiteralPath $script:CmdExe) {
-        $env:ComSpec = $script:CmdExe
-    }
-
     $prevPref = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
@@ -356,7 +369,12 @@ function Repair-BuildShell {
 
 function Ensure-BoardConfig {
     $sdkconfigPath = Join-Path $script:ProjectRoot "sdkconfig"
-    $boardMacro = "CONFIG_BOARD_TYPE_WAVESHARE_S3_RLCD_4_2=y"
+    $boardMacro = "CONFIG_BOARD_TYPE_WAVESHARE_ESP32_S3_RLCD_4_2=y"
+    $wakeLines = @(
+        "CONFIG_WAKE_WORD_DISABLED=n",
+        "CONFIG_USE_AFE_WAKE_WORD=y",
+        "CONFIG_SR_WN_WN9_NIHAOXIAOZHI_TTS=y"
+    )
 
     if (-not (Test-Path -LiteralPath $sdkconfigPath)) {
         Write-Host "  [信息] 未找到 sdkconfig，初始化目标芯片 $($script:Chip) 与板型配置..." -ForegroundColor Yellow
@@ -369,7 +387,7 @@ function Ensure-BoardConfig {
             $boardMacro,
             "CONFIG_USE_WECHAT_MESSAGE_STYLE=n",
             "CONFIG_USE_DEVICE_AEC=y"
-        )
+        ) + $wakeLines
         Add-Content -LiteralPath $sdkconfigPath -Value $appendLines -Encoding Ascii
         return
     }
@@ -377,6 +395,17 @@ function Ensure-BoardConfig {
     $sdkContent = Get-Content -LiteralPath $sdkconfigPath -Raw
     if ($sdkContent -notmatch [regex]::Escape($boardMacro)) {
         throw "当前 sdkconfig 未启用 $boardMacro，请先执行清理或在 menuconfig 中选择 Waveshare ESP32-S3-RLCD-4.2 开发板。"
+    }
+
+    if (($sdkContent -notmatch "(?m)^CONFIG_USE_AFE_WAKE_WORD=y") -or
+        ($sdkContent -notmatch "(?m)^CONFIG_SR_WN_WN9_NIHAOXIAOZHI_TTS=y")) {
+        Write-Host "  [信息] 更新 sdkconfig 启用唤醒词: 你好小智 (wn9_nihaoxiaozhi_tts)..." -ForegroundColor Yellow
+        $updated = $sdkContent -replace "(?m)^CONFIG_WAKE_WORD_DISABLED=y\r?$", "# CONFIG_WAKE_WORD_DISABLED is not set"
+        $updated = $updated -replace "(?m)^# CONFIG_USE_AFE_WAKE_WORD is not set\r?$", "CONFIG_USE_AFE_WAKE_WORD=y"
+        $updated = $updated -replace "(?m)^# CONFIG_SR_WN_WN9_NIHAOXIAOZHI_TTS is not set\r?$", "CONFIG_SR_WN_WN9_NIHAOXIAOZHI_TTS=y"
+        if ($updated -notmatch "(?m)^CONFIG_USE_AFE_WAKE_WORD=y") { $updated += "`r`nCONFIG_USE_AFE_WAKE_WORD=y" }
+        if ($updated -notmatch "(?m)^CONFIG_SR_WN_WN9_NIHAOXIAOZHI_TTS=y") { $updated += "`r`nCONFIG_SR_WN_WN9_NIHAOXIAOZHI_TTS=y" }
+        [System.IO.File]::WriteAllText($sdkconfigPath, $updated, (New-Object System.Text.UTF8Encoding($false)))
     }
 }
 

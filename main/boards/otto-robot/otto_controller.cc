@@ -71,7 +71,9 @@ private:
     static void ActionTask(void* arg) {
         OttoController* controller = static_cast<OttoController*>(arg);
         OttoActionParams params;
-        controller->otto_.AttachServos();
+        // Otto::Init() already attached all servos. Re-attaching here configures the
+        // same LEDC channels and reserves the same GPIOs a second time, which can
+        // leave the servos without PWM.
 
         while (true) {
             if (xQueueReceive(controller->action_queue_, &params, pdMS_TO_TICKS(1000)) == pdTRUE) {
@@ -406,7 +408,12 @@ private:
                     }
                     if(params.action_type != ACTION_SIT){
                         if (params.action_type != ACTION_HOME && params.action_type != ACTION_SERVO_SEQUENCE) {
-                            controller->otto_.Home(params.action_type != ACTION_HANDS_UP);
+                            UBaseType_t pending_actions =
+                                uxQueueMessagesWaiting(controller->action_queue_);
+                            // 如果后面还有动作，先不归位，避免“动作末尾急停+马上再启动”
+                            if (pending_actions == 0) {
+                                controller->otto_.Home(params.action_type != ACTION_HANDS_UP);
+                            }
                         }
                     }
                 }

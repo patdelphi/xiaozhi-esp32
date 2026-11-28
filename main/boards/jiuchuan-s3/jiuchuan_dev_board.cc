@@ -52,9 +52,6 @@ public:
         // 状态栏容器适配
         lv_obj_set_style_pad_left(top_bar_, LV_HOR_RES * 0.12, 0);  // 左侧填充12%
         lv_obj_set_style_pad_right(top_bar_, LV_HOR_RES * 0.12, 0); // 右侧填充12%
-        // 兼容旧状态栏容器（部分主题/布局仍会读 status_bar_）
-        lv_obj_set_style_pad_left(status_bar_, LV_HOR_RES * 0.167, 0);
-        lv_obj_set_style_pad_right(status_bar_, LV_HOR_RES * 0.167, 0);
         // 表情容器上移适配
         lv_obj_align(emoji_box_, LV_ALIGN_CENTER, 0, -30);          // 向上偏移30
         // 消息栏适配
@@ -234,7 +231,8 @@ private:
                 // 如果当前是聆听状态，切换到待命状态
                 ESP_LOGI(TAG, "从聆听状态切换到待命状态");
                 app.ToggleChatState(); // 切换到待命状态
-            } else if (current_state == kDeviceStateSpeaking) {
+            } else if (current_state == kDeviceStateSpeaking ||
+                       current_state == kDeviceStateNotifying) {
                 // 如果当前是说话状态，终止说话并切换到待命状态
                 ESP_LOGI(TAG, "从说话状态切换到待命状态");
                 app.ToggleChatState(); // 终止说话
@@ -314,7 +312,7 @@ private:
             ESP_LOGI(TAG, "Install LCD driver");
             esp_lcd_panel_dev_config_t panel_config = {};
             panel_config.reset_gpio_num = GPIO_NUM_NC;
-            panel_config.rgb_ele_order = LCD_RGB_ENDIAN_BGR;
+            panel_config.rgb_ele_order = LCD_RGB_ELEMENT_ORDER_BGR;
             panel_config.bits_per_pixel = 16;
             esp_lcd_new_panel_gc9309na(panel_io, &panel_config, &panel);
 
